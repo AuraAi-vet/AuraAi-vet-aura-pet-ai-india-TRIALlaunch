@@ -1,0 +1,191 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ===============================================================
+    // Shared Primitives
+    // ===============================================================
+    
+    function isSignedIn() { return request.auth != null; }
+    function isVerified() { return isSignedIn(); } // Simplify to avoid token.email_verified issues
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    
+    // Admin check by email (No DB read)
+    function isHardAdmin() {
+      return isSignedIn() && 
+             (request.auth.token.email == "auraaivet@gmail.com");
+    }
+
+    // Role checks
+    function isOwner(ownerId) { return isSignedIn() && request.auth.uid == ownerId; }
+    function getUserRole() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid)) ? 
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role : 'user';
+    }
+    function isVet() { return isSignedIn() && getUserRole() == 'vet'; }
+    function isProvider() { return isSignedIn() && getUserRole() == 'provider'; }
+
+
+    // ===============================================================
+    // Collection Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['name', 'email', 'role']) &&
+             data.name is string && data.name.size() > 0 &&
+             data.email is string &&
+             data.role is string;
+    }
+
+    function isValidPet(data) {
+      return data.keys().hasAll(['name', 'type', 'ownerId']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 128 &&
+             data.type is string &&
+             data.ownerId == request.auth.uid;
+    }
+
+    // ===============================================================
+    // Resource Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isHardAdmin() || isVet() || isProvider();
+      allow list: if isSignedIn() && (resource.data.role == 'vet' || isHardAdmin());
+      allow create: if isOwner(userId) && isValidUser(incoming());
+      allow update: if (isOwner(userId) || isHardAdmin());
+    }
+
+    match /pets/{petId} {
+      allow get: if isValidId(petId) && (isOwner(existing().ownerId) || isHardAdmin() || isVet() || isProvider());
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isHardAdmin() || isVet() || isProvider());
+      
+      allow create: if isVerified() && isValidPet(incoming());
+      allow update: if isVerified() && (isOwner(existing().ownerId) || isHardAdmin()) && isValidPet(incoming());
+      allow delete: if isVerified() && (isOwner(existing().ownerId) || isHardAdmin());
+    }
+
+    match /healthRecords/{recordId} {
+      allow get: if isValidId(recordId) && (isOwner(existing().ownerId) || isHardAdmin() || isVet() || isProvider());
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isHardAdmin() || isVet() || isProvider());
+      
+      allow create: if isVerified() && incoming().ownerId == request.auth.uid;
+      allow update, delete: if isVerified() && (isOwner(existing().ownerId) || isHardAdmin());
+    }
+
+    match /appointments/{appointmentId} {
+      allow get: if isValidId(appointmentId) && (resource.data.ownerId == request.auth.uid || resource.data.vetId == request.auth.uid || isHardAdmin());
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || resource.data.vetId == request.auth.uid || isHardAdmin());
+      
+      allow create: if isVerified() && incoming().ownerId == request.auth.uid;
+      allow update: if isVerified() && (resource.data.ownerId == request.auth.uid || resource.data.vetId == request.auth.uid || isHardAdmin());
+      allow delete: if isVerified() && (resource.data.ownerId == request.auth.uid || isHardAdmin());
+    }
+
+    match /communityPosts/{postId} {
+      allow get: if isValidId(postId);
+      allow list: if isSignedIn() && (isHardAdmin() || resource.data.authorId is string); // Ensure it's a valid post
+      allow create: if isVerified() && incoming().authorId == request.auth.uid;
+      allow update: if isVerified() && isOwner(existing().authorId) && incoming().authorId == existing().authorId;
+      allow delete: if isVerified() && (isOwner(existing().authorId) || isHardAdmin());
+    }
+
+    match /messages/{messageId} {
+      allow create: if isVerified() && incoming().senderId == request.auth.uid;
+      allow get: if isValidId(messageId) && (request.auth.uid == resource.data.senderId || request.auth.uid == resource.data.receiverId || isHardAdmin());
+      allow list: if isSignedIn() && (resource.data.senderId == request.auth.uid || resource.data.receiverId == request.auth.uid || isHardAdmin());
+      allow update: if isVerified() && request.auth.uid == resource.data.receiverId;
+    }
+
+    match /quickLogs/{logId} {
+      allow get: if isValidId(logId) && (isOwner(existing().ownerId) || isHardAdmin() || isVet() || isProvider());
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isHardAdmin() || isVet() || isProvider());
+      allow create: if isVerified() && incoming().ownerId == request.auth.uid;
+      allow update, delete: if isVerified() && (isOwner(existing().ownerId) || isHardAdmin());
+    }
+
+    match /petDocuments/{documentId} {
+      allow get: if isValidId(documentId) && (isOwner(existing().ownerId) || isHardAdmin() || isVet() || isProvider());
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isHardAdmin() || isVet() || isProvider());
+      allow create: if isVerified() && incoming().ownerId == request.auth.uid;
+      allow update, delete: if isVerified() && (isOwner(existing().ownerId) || isHardAdmin());
+    }
+
+    match /notifications/{notificationId} {
+      allow get: if isValidId(notificationId) && resource.data.userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow update, delete: if isVerified() && (resource.data.userId == request.auth.uid || isHardAdmin());
+      allow create: if isSignedIn(); 
+    }
+
+    match /licenses/{licenseId} {
+      allow get, list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isHardAdmin());
+      allow create: if isVerified() && incoming().ownerId == request.auth.uid;
+      allow update, delete: if isHardAdmin();
+    }
+
+    match /publicAlerts/{alertId} {
+      allow get: if isValidId(alertId);
+      allow list: if isSignedIn() && (isHardAdmin() || resource.data.type is string);
+      allow write: if isHardAdmin();
+    }
+
+    match /trainingProgress/{progressId} {
+      allow get, list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create, update: if isVerified() && incoming().userId == request.auth.uid;
+    }
+
+    match /activityLogs/{logId} {
+      allow get, list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerified() && incoming().ownerId == request.auth.uid;
+      allow update, delete: if isVerified() && (isOwner(existing().ownerId) || isHardAdmin());
+    }
+
+    match /feedback/{feedbackId} {
+      allow create: if isSignedIn();
+      allow read, write: if isHardAdmin();
+    }
+
+    match /aiInteractionLogs/{logId} {
+      allow create: if isSignedIn();
+      allow read, write: if isSignedIn();
+    }
+
+    match /_connection_test_/{docId} {
+      allow get: if true; // Public read for connectivity test only
+    }
+
+    match /userTasks/{taskId} {
+      allow get: if isValidId(taskId) && resource.data.userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isVerified() && incoming().userId == request.auth.uid;
+      allow update, delete: if isVerified() && existing().userId == request.auth.uid;
+    }
+
+    match /blockedSlots/{slotId} {
+      allow get: if isValidId(slotId);
+      allow list: if isVerified() && (isHardAdmin() || resource.data.vetId is string);
+      allow write: if isHardAdmin(); 
+    }
+
+    match /services/{serviceId} {
+      allow get: if isValidId(serviceId);
+      allow list: if isSignedIn() && (isHardAdmin() || resource.data.providerId is string);
+      allow create: if isVerified() && incoming().providerId == request.auth.uid;
+      allow update, delete: if isVerified() && (existing().providerId == request.auth.uid || isHardAdmin());
+    }
+
+    match /inventoryItems/{itemId} {
+      allow get: if isValidId(itemId);
+      allow list: if isSignedIn() && (isHardAdmin() || resource.data.providerId is string);
+      allow create: if isVerified() && incoming().providerId == request.auth.uid;
+      allow update, delete: if isVerified() && (existing().providerId == request.auth.uid || isHardAdmin());
+    }
+  }
+}
